@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Depends
 from tortoise.contrib.fastapi import register_tortoise
 from models import *
 from authentication import *
@@ -334,9 +334,8 @@ async def update_product(id: int, update_info: product_pydanticIn,
         )
 
 
-
 @app.put("/business/{id}")
-async def update_business(id:int,
+async def update_business(id: int,
                           update_business: business_pydanticIn,
                           user: user_pydantic = Depends(get_current_user)):
 
