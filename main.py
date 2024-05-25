@@ -1,11 +1,10 @@
-import jwt
-from fastapi import FastAPI, Request, status, HTTPException, Depends
+from fastapi import FastAPI, Request
 from tortoise.contrib.fastapi import register_tortoise
 from models import *
 from authentication import *
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from tortoise.signals import post_save
-from typing import List, Optional, Type
+from typing import Optional, Type
 from tortoise import BaseDBAsyncClient
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
@@ -16,7 +15,7 @@ import secrets
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
 from jwt import PyJWTError
-
+import os
 app = FastAPI()
 
 oath2_scheme = OAuth2PasswordBearer(tokenUrl='token')
@@ -54,6 +53,7 @@ async def get_current_user(token: str = Depends(oath2_scheme)):
             detail='Invalid username or password',
             headers={"WWW-Authenticate": "Bearer"}
         )
+
 
 @app.post("/user/me")
 async def user_login(user: user_pydanticIn = Depends(get_current_user)):
@@ -204,7 +204,13 @@ async def create_upload_file(id: int, file: UploadFile = File(...),
 
     file.close()
 
-    product = await Product.get(id=id)
+    product = await Product.get_or_none(id=id)
+    if not product:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Product not found"
+        )
+
     business = await product.business
     owner = await business.owner
 
@@ -231,16 +237,18 @@ async def add_new_product(product: product_pydanticIn,
     product = product.dict(exclude_unset=True)
 
     if product["original_price"] > 0:
-        product["percentage_discount"] = ((product["original_price"] - product["new_price"]) / product["original_price"]) * 100
+        product["percentage_discount"] = ((product["original_price"] - product["new_price"])
+                                          / product["original_price"]) * 100
         
         product_obj = await Product.create(**product, business=user)
         product_obj = await product_pydantic.from_tortoise_orm(product_obj)
 
-        return {"status": "OK", "data": product_obj} ,print(product_obj.id)
+        return {"status": "OK", "data": product_obj}, print(product_obj.id)
     
     else:
         return {"status": "error"}
-    
+
+
 @app.get("/products")
 async def get_products():
     response = await product_pydantic.from_queryset(Product.all())
@@ -255,20 +263,22 @@ async def get_product(id: int):
     response = await product_pydantic.from_queryset_single(Product.get(id=id))
 
     return {"status": "OK", "data": {
-        "product_details" : response,
+        "product_details": response,
         "business_details": { 
-            "name": business.business_name ,
+            "name": business.business_name,
             "city": business.city,
             "region": business.region,
             "description": business.business_description,
             "logo": business.logo,
             "owner_id": owner.id,
+            "business_id": business.id,
             "email": owner.email,
             "join_date": owner.join_date.strftime("%b %d %Y")
 
             }
         }
     }
+
 
 @app.delete("/product/{id}")
 async def delete_product(id: int, user: user_pydantic = Depends(get_current_user)):
@@ -277,17 +287,75 @@ async def delete_product(id: int, user: user_pydantic = Depends(get_current_user
     owner = await business.owner
 
     if user == owner:
-          await product.delete()
+        if product.product_image and os.path.exists(product.product_image):
+            print("Deleting file:", product.product_image)
+            try:
+                os.remove(product.product_image)
+                print("File deleted successfully.")
+            except Exception as e:
+                print(f"Error deleting file: {e}")
+        else:
+            print("File not found or product has default image.")
+
+        await product.delete()
     else:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Not authenticated to preform this action",
+            detail="Not authenticated to perform this action",
             headers={"WWW-Authenticate": "Bearer"}
         )
-    
-    return{"status": "OK"}
+
+    return {"status": "OK"}
 
 
+@app.put("/product/{id}")
+async def update_product(id: int, update_info: product_pydanticIn,
+                         user: user_pydantic = Depends(get_current_user)):
+    product = await Product.get(id=id)
+    business = await product.business
+    owner = await business.owner
+
+    update_info = update_info.dict(exclude_unset=True)
+    update_info["date_published"] = datetime.now()
+
+    if user == owner and update_info["original_price"] > 0:
+        update_info['percentage_discount'] = ((update_info['original_price'] -
+                                               update_info['new_price']) / update_info['original_price']) * 100
+
+        product = await product.update_from_dict(update_info)
+        await product.save()
+        response = await product_pydantic.from_tortoise_orm(product)
+        return {"status": "OK", "data": response}
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated to preform this action or invalid user input",
+            headers={"WWW-Authenticate": "Bearer"}
+        )
+
+
+
+@app.put("/business/{id}")
+async def update_business(id:int,
+                          update_business: business_pydanticIn,
+                          user: user_pydantic = Depends(get_current_user)):
+
+    update_business = update_business.dict()
+
+    business = await Business.get(id=id)
+    business_owner = await business.owner
+
+    if user == business_owner:
+        await business.update_from_dict(update_business)
+        await business.save()
+        response = await business_pydantic.from_tortoise_orm(business)
+        return {"status": "OK", "data": response}
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated to preform this action or invalid user input",
+            headers={"WWW-Authenticate": "Bearer"}
+            )
 
 
 register_tortoise(app,
